@@ -46,3 +46,7 @@ docker compose up -d
 5. URL: http://your.ip.address:3000 or hostname, e.g., http://lubimyczytac-abs-v2:3000 (without a trailing slash).
 6. Authorization Header: any value (cannot be blank), e.g., 00000.
 7. Save and test the provider.
+
+## Screenshots
+
+![List of matches](https://github.com/user-attachments/assets/ce574070-6689-4890-b598-c75559cc809d)
