@@ -43,6 +43,6 @@ docker compose up -d
 2. Go to Metadata Utils/Custom Metada Providers
 3. Click on Add.
 4. Name: e.g., LubimyCzytac V2
-5. URL: http://<your-ip>:3000 or hostname, e.g., http://lubimyczytac-abs-v2:3000 (without a trailing slash).
+5. URL: http://your.ip.address:3000 or hostname, e.g., http://lubimyczytac-abs-v2:3000 (without a trailing slash).
 6. Authorization Header: any value (cannot be blank), e.g., 00000.
 7. Save and test the provider.
