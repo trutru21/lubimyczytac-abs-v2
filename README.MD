@@ -1,7 +1,7 @@
 # lubimyczytac-abs-v2
-Optimized, faster Audiobookshelf Custom Metadata Provider for https://lubimyczytac.pl
+Optimized, faster **Audiobookshelf** Custom Metadata Provider for **https://lubimyczytac.pl**
 
-Refactored and optimized version of the original `https://github.com/lakafior/lubimyczytac-abs` provider.
+Refactored and optimized version of the original [lakafior/lubimyczytac-abs](https://github.com/lakafior/lubimyczytac-abs) provider.
 
 ## Improvements over the original version (V2):
 - **Faster responses:** avoids heavy logging and skips oversized / blocked pages, keeping replies within Audiobookshelf’s 10 s limit.
