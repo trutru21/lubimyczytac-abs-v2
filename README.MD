@@ -8,7 +8,7 @@ Refactored and optimized version of the original [lakafior/lubimyczytac-abs](htt
 - **Adaptive Delay System:** Dynamically adjusts request delays based on the remaining time budget to avoid 429/IP bans from Lubimyczytac.pl
 - **Configurable** limits – `BUDGET_MS` and `MAX_RESULTS` can be tuned via environment variables.
 - **Bot Wall & WAF Protection:** detects Cloudflare or anti-scraping pages and aborts safely.
-- **Cleaner Parsing:** extracts readable descriptions without injected site clutter. (`\n\n`).
+- **Cleaner Parsing:** extracts readable descriptions without injected site clutter.
 ---
 
 # Instructions
@@ -31,7 +31,7 @@ services:
       - "3000:3000"
     environment:
       - MAX_RESULTS=5       # Number of results to fetch full details for
-      - BUDGET_MS=7500      # Global time budget (Audiobookshelf timeout is 10s)
+      - BUDGET_MS=8500      # Global time budget (Audiobookshelf timeout is 10s)
 ```
 2. Pull the latest Docker image and start the application:
 ```bash
