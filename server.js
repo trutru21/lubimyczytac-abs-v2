@@ -1,4 +1,4 @@
-//  v6
+//  v10
 const express = require("express");
 const axios = require("axios");
 const cheerio = require("cheerio");
@@ -11,16 +11,17 @@ const https = require("https");
 const app = express();
 const port = process.env.PORT || 3000;
 
-/* ------------------ CACHE ------------------ */
+/* CACHE */
 const searchCache = new NodeCache({ stdTTL: 600 });
 const detailsCache = new NodeCache({ stdTTL: 86400 });
 
-/* ------------------ HTTP TUNING ------------------ */
+/* HTTP TUNING */
 const agentOptions = {
     keepAlive: true,
     maxSockets: 5,
-    maxFreeSockets: 2,
-    timeout: 6000
+    maxFreeSockets: 5,
+    timeout: 6000,
+    freeSocketTimeout: 4000
 };
 const agent = new http.Agent(agentOptions);
 const secureAgent = new https.Agent(agentOptions);
@@ -33,21 +34,25 @@ axios.defaults.headers.common["User-Agent"] =
 axios.defaults.headers.common["Accept-Language"] = "pl-PL,pl;q=0.9";
 axios.defaults.headers.common["Connection"] = "keep-alive";
 
-/* ------------------ HELPERS ------------------ */
+/* HELPERS */
 
-const adaptiveDelay = (timeLeft, totalBudget) => {
-    const ratio = Math.max(0, Math.min(1, timeLeft / totalBudget));
-    const minDelay = 40;
-    const maxDelay = 300;
-    const base = minDelay + ratio * (maxDelay - minDelay);
-    const jitter = Math.random() * 60;
-    return new Promise(r => setTimeout(r, base + jitter));
+const adaptiveDelay = (ms, signal) => {
+    return new Promise((resolve) => {
+        const timeoutId = setTimeout(resolve, ms);
+        if (signal) {
+            signal.addEventListener('abort', () => {
+                clearTimeout(timeoutId);
+                // Graceful exit zamiast rzucania wyjątku
+                resolve();
+            }, { once: true });
+        }
+    });
 };
 
 const normalize = (s = "") =>
 s.toLowerCase().replace(/\s+/g, " ").trim();
 
-/* ------------------ EXPRESS ------------------ */
+/* EXPRESS */
 
 app.use(cors());
 
@@ -57,7 +62,7 @@ app.use((req, res, next) => {
     next();
 });
 
-/* ------------------ PROVIDER ------------------ */
+/* PROVIDER */
 
 class LubimyCzytacProvider {
     constructor() {
@@ -79,34 +84,42 @@ class LubimyCzytacProvider {
         const timeLeft = () => Math.max(0, budget.deadline - Date.now());
         const isExpired = () => Date.now() >= budget.deadline;
 
-        /* ---------- CLEAN INPUT ---------- */
-        if (!author && query.includes("-")) {
-            author = query.split("-")[0].replace(/\./g, " ").trim();
-        } else if (author) {
-            author = author.split("-")[0].replace(/\./g, " ").trim();
-        }
+        /* CLEAN INPUT */
+        query = (query || "").slice(0, 200);
+        author = (author || "").slice(0, 100).replace(/\./g, " ").trim();
 
         let cleanedTitle = query;
+        const sepIdx = query.indexOf(" - ");
+
+        if (sepIdx !== -1 && sepIdx < 80) {
+
+            const prefix = query.slice(0, sepIdx).trim();
+            const rest = query.slice(sepIdx + 3);
+            if (!author) {
+                author = prefix.replace(/\./g, " ").trim();
+            }
+
+            cleanedTitle = rest;
+        }
+
+        /* CLEAN TITLE */
+
         if (!/^".*"$/.test(cleanedTitle)) {
             cleanedTitle = cleanedTitle
-            .replace(/(\d+kbps)/g, "")
+            .replace(/(\d+kbps)/gi, "")
             .replace(/\bVBR\b.*$/gi, "")
-            .replace(/^[\w\s.-]+-\s*/g, "")
-            .replace(/czyt.*/gi, "")
-            .replace(/.*?-\s*/, "") // lazy, usuwa tylko do pierwszego myślnika
-            // .replace(/.*-/, "") // greedy, usuwa więcej myślników
-            .replace(/.*?(T[\s.]?\d{1,3}).*?(.*)$/i, "$2")
-            .replace(/.*?(Tom[\s.]?\d{1,3}).*?(.*)$/i, "$2")
-            .replace(/.*?\(\d{1,3}\)\s*/g, "")
-            .replace(/\(.*?\)/g, "")
             .replace(/\[.*?\]/g, "")
-            .replace(/\(/g, " ")
-            .replace(/[^\p{L}\d]/gu, " ")
-            .replace(/\./g, " ")
+            .replace(/czyt.*/gi, "")
+            .replace(/superprodukcja/gi, "")
+            .replace(/\s-\s/g, "-")
+            .replace(/\bT(?:om)?[\s.]?\d{1,3}\b/gi, "")
+            .replace(/\(\d{1,3}\)/g, "")
+            .replace(/\(.*?\)/g, "")
+            .replace(/[^\p{L}\d\-]/gu, " ")
             .replace(/\s+/g, " ")
-            .replace(/superprodukcja/i, "")
             .trim();
-        } else {
+        }
+        else {
             cleanedTitle = cleanedTitle.replace(/^"(.*)"$/, "$1");
         }
 
@@ -122,40 +135,130 @@ class LubimyCzytacProvider {
         const booksUrl = `${this.baseUrl}/szukaj/ksiazki?phrase=${encodeURIComponent(cleanedTitle)}${author ? `&author=${encodeURIComponent(author)}` : ""}`;
         const audiobooksUrl = `${this.baseUrl}/szukaj/audiobooki?phrase=${encodeURIComponent(cleanedTitle)}${author ? `&author=${encodeURIComponent(author)}` : ""}`;
 
-        const fetchList = async (url) => {
-            if (isExpired()) return Buffer.alloc(0);
+        /* FETCH & PARSE WORKER */
+        const fetchAndParse = async (url, type) => {
+            if (isExpired()) return [];
             try {
                 const res = await axios.get(url, {
                     responseType: "arraybuffer",
-                    timeout: Math.min(3000, timeLeft()),
-                                            signal
+                    timeout: Math.min(5500, timeLeft()),
+                    maxContentLength: 1500000,
+                    maxBodyLength: 1500000,
+                    signal
                 });
-                return res.data;
+
+                const finalUrl = res.request?.res?.responseUrl || url;
+
+                // 6. Cross-domain redirect protection
+                if (!finalUrl.includes('lubimyczytac.pl') && !finalUrl.startsWith(this.baseUrl)) {
+                    console.warn(`[Fetch Warn] Zignorowano przekierowanie poza domenę docelową: ${finalUrl}`);
+                    return [];
+                }
+
+                // 3. Decode Text
+                const html = typeof this.decodeText === 'function' ? this.decodeText(res.data) : res.data.toString("utf8");
+
+                // 1. Sanity-check / anty-bot protection
+                if (html.includes("challenge-platform") || html.includes("cf-browser-verification")) {
+                    throw new Error("Wykryto ścianę antybotową (Cloudflare).");
+                }
+                if (html.length < 500) {
+                    throw new Error("Nie rozpoznano struktury LC (możliwa blokada).");
+                }
+
+                const $ = cheerio.load(html);
+                const results = [];
+
+                // 4. Perfect Match logic
+                if (finalUrl.includes('/ksiazka/')) {
+                    console.log(`[Search] Wykryto Perfect Match (${type}): ${finalUrl}`);
+                    const title = $('h1.book__title').text().trim();
+                    const authorName = $('.book__author-name').first().text().trim() ||
+                    $('.authorAllCards__itemText a').first().text().trim() || author;
+
+                    // Wyciągamy ID z finalUrl (np. https://lubimyczytac.pl/ksiazka/123456/tytul)
+                    const idMatch = finalUrl.match(/\/ksiazka\/(\d+)/);
+                    const bookId = idMatch ? idMatch[1] : undefined;
+
+                    results.push({
+                        id: bookId,
+                        title: title,
+                        authors: [authorName],
+                        url: finalUrl,
+                        type: type,
+                        isPerfectMatch: true
+                    });
+                }
+
+                else {
+                    let items = $('.authorAllCards__item');
+                    if (!items.length) {
+                        items = $('.authorAllBooks__single');
+                    }
+
+                    items.slice(0, 10).each((i, el) => {
+                        const titleTag = $(el).find('a.authorAllCards__itemTitle, a.authorAllBooks__singleTextTitle');
+                        const title = titleTag.text().trim();
+                        const href = titleTag.attr('href');
+                        const idMatch = href && href.match(/\/ksiazka\/(\d+)/);
+                        const bookId = idMatch ? idMatch[1] : undefined;
+
+                        const bookAuthor = $(el).find('.authorAllCards__itemText a, .authorAllBooks__singleTextAuthor a')
+                        .not('.authorAllCards__itemTitle, .authorAllBooks__singleTextTitle')
+                        .first().text().trim();
+
+                        if (title && href) {
+                            results.push({
+                                id: bookId,
+                                title: title,
+                                authors: bookAuthor ? [bookAuthor] : (author ? [author] : []),
+                                         url: href.startsWith('http') ? href : `${this.baseUrl || 'https://lubimyczytac.pl'}${href}`,
+                                         type: type,
+                                         isPerfectMatch: false
+                            });
+                        }
+                    });
+                }
+                return results;
             } catch (err) {
-                console.warn(`[FetchList Warn] Problem z pobraniem listy z ${url.includes('audiobooki') ? 'audiobooki' : 'ksiazki'}: ${err.message}`);
-                return Buffer.alloc(0);
+                console.warn(`[Fetch Warn] Problem z pobraniem/parsowaniem ${type}: ${err.message}`);
+                return [];
             }
         };
 
-        const [booksRaw, audiobooksRaw] = await Promise.all([
-            fetchList(booksUrl),
-                                                            fetchList(audiobooksUrl),
+        /* CONCURRENT FETCH */
+        const [parsedBooks, parsedAudiobooks] = await Promise.all([
+            fetchAndParse(booksUrl, "book"),
+                                                                  fetchAndParse(audiobooksUrl, "audiobook")
         ]);
 
-        const parsedBooks = this.parseSearchResults(booksRaw, "book");
-        const parsedAudiobooks = this.parseSearchResults(audiobooksRaw, "audiobook");
         console.log(`[Search] Znalazłem: ${parsedBooks.length} książek, ${parsedAudiobooks.length} audiobooków`);
-
         const matches = [...parsedBooks, ...parsedAudiobooks];
 
+        /* SCORING & RANKING */
         let ranked = matches
         .map(m => {
             const titleSim = stringSimilarity.compareTwoStrings(normalize(m.title), normalize(cleanedTitle));
             let combinedSim = titleSim;
-            if (author) {
-                const authorSim = Math.max(...m.authors.map(a => stringSimilarity.compareTwoStrings(normalize(a), normalize(author))), 0);
+            let authorSim = 0;
+
+            if (author && m.authors && m.authors.length > 0) {
+                authorSim = Math.max(...m.authors.map(a => stringSimilarity.compareTwoStrings(normalize(a), normalize(author))), 0);
                 combinedSim = titleSim * 0.6 + authorSim * 0.4;
             }
+
+            if (m.isPerfectMatch) {
+                const threshold = 0.35;
+
+                if (combinedSim < threshold) {
+                    console.log(`[Score] Odrzucono Perfect Match dla "${m.title}" (Zbyt niskie podobieństwo bazowe: ${combinedSim.toFixed(2)}). Degrada do zwykłego wyniku.`);
+                    return { ...m, similarity: combinedSim, isPerfectMatch: false };
+                } else {
+                    console.log(`[Score] Potwierdzono Perfect Match dla "${m.title}" (Podobieństwo bazowe: ${combinedSim.toFixed(2)}). Wymuszam top ranking.`);
+                    return { ...m, similarity: 1.1 };
+                }
+            }
+
             return { ...m, similarity: combinedSim };
         })
         .sort((a, b) => {
@@ -164,13 +267,14 @@ class LubimyCzytacProvider {
             const typeValueB = b.type === "audiobook" ? 1 : 0;
             return typeValueB - typeValueA;
         });
-        const maxResults = parseInt(process.env.MAX_RESULTS) || 5; // Max ilość wyników. Uwaga: czym więcej wyników tym większa szansa na timeout lub soft-ban od Lubimyczytac
 
+        const maxResults = parseInt(process.env.MAX_RESULTS) || 5;
         ranked = ranked.slice(0, maxResults);
 
         console.log(`[Rank] Zawężono do top ${maxResults}. Rozpoczynam pobieranie detali...`);
         const enriched = [];
 
+        /*  DEEP DETAILS FETCHING  */
         for (const match of ranked) {
             const remaining = timeLeft();
 
@@ -193,7 +297,8 @@ class LubimyCzytacProvider {
                 continue;
             }
 
-            await adaptiveDelay(remaining, budget.total);
+            const jitter = Math.min(250, Math.max(40, remaining * 0.05));
+            await adaptiveDelay(jitter, signal);
 
             console.log(`[Fetch] Pobieram okładkę/opis dla "${match.title}" (Typ: ${match.type}). Budżet: ${remaining}ms`);
             try {
@@ -209,6 +314,7 @@ class LubimyCzytacProvider {
             }
         }
 
+        /* FINAL PENALTIES */
         console.log(`[Sort] Aplikuję karę za brak ISBN...`);
         const finalAdjustedMatches = enriched.map((match) => {
             let adjustedSimilarity = match.similarity;
@@ -224,8 +330,16 @@ class LubimyCzytacProvider {
         });
 
         const result = { matches: finalAdjustedMatches };
-        searchCache.set(cacheKey, result);
-        return result;
+
+        if (finalAdjustedMatches.length > 0) {
+            searchCache.set(cacheKey, result); // Sukces - standardowy zapis (600s z konstruktora)
+        } else {
+            console.log(`[Cache Warn] Błąd pobierania lub pusty wynik. Aplikuję krótki negative-cache (30s) dla "${cleanedTitle}".`);
+            // Negative cache - 30 sekund zapobiega spamowaniu API przy błędach/pustych wynikach
+            searchCache.set(cacheKey, result, 30);
+        }
+
+        return result; // Koniec funkcji searchBooks
     }
 
     parseSearchResults(buffer, type) {
@@ -347,14 +461,14 @@ class LubimyCzytacProvider {
 
 const provider = new LubimyCzytacProvider();
 
-/* ------------------ ROUTE ------------------ */
+/* ROUTE */
 
 app.get("/search", async (req, res) => {
     const startTimer = Date.now();
     console.log(`\n------------------------------------------------------------------------------------------------`);
     console.log(`Received search request:`, req.query);
 
-    const REQUEST_BUDGET_MS = parseInt(process.env.BUDGET_MS) || 7500;     // Globalny limit czasu wyszukiwania w LC. ABS ma limit 10s, więc nie ustawiać więvcej niż 9000.
+    const REQUEST_BUDGET_MS = parseInt(process.env.BUDGET_MS) || 8500;     // Globalny limit czasu wyszukiwania w LC. ABS ma limit 10s, więc nie ustawiać więvcej niż 9000.
     const budget = { deadline: Date.now() + REQUEST_BUDGET_MS, total: REQUEST_BUDGET_MS };
 
     const controller = new AbortController();
@@ -389,7 +503,7 @@ app.get("/search", async (req, res) => {
 
         const duration = Date.now() - startTimer;
         console.log(`[DONE] Zakończono w ${duration}ms. Odsyłam pełnego JSONa.`);
-        // console.log(JSON.stringify(formattedResults, null, 2));
+        // console.log(JSON.stringify(formattedResults, null, 2)); // odkomentuj, jeśli chcesz zobaczyć wyniki szukania w logach
 
         res.json(formattedResults);
     } catch (e) {
