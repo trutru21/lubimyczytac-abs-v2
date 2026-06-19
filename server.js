@@ -1,4 +1,4 @@
-//  v10
+//  v11 fix: update LubimyCzytac parser selectors for new HTML structure
 const express = require("express");
 const axios = require("axios");
 const cheerio = require("cheerio");
@@ -191,20 +191,16 @@ class LubimyCzytacProvider {
                 }
 
                 else {
-                    let items = $('.authorAllCards__item');
-                    if (!items.length) {
-                        items = $('.authorAllBooks__single');
-                    }
+                    const items = $('.book-card');
 
                     items.slice(0, 10).each((i, el) => {
-                        const titleTag = $(el).find('a.authorAllCards__itemTitle, a.authorAllBooks__singleTextTitle');
+                        const titleTag = $(el).find('a.book-card__title');
                         const title = titleTag.text().trim();
                         const href = titleTag.attr('href');
                         const idMatch = href && href.match(/\/ksiazka\/(\d+)/);
                         const bookId = idMatch ? idMatch[1] : undefined;
 
-                        const bookAuthor = $(el).find('.authorAllCards__itemText a, .authorAllBooks__singleTextAuthor a')
-                        .not('.authorAllCards__itemTitle, .authorAllBooks__singleTextTitle')
+                        const bookAuthor = $(el).find('.book-card__author a')
                         .first().text().trim();
 
                         if (title && href) {
@@ -353,17 +349,20 @@ class LubimyCzytacProvider {
         const $ = cheerio.load(decodedData);
         const matches = [];
 
-        $(".authorAllBooks__single").each((_, el) => {
-            const title = $(el).find(".authorAllBooks__singleTextTitle").text().trim();
-            const url = $(el).find(".authorAllBooks__singleTextTitle").attr("href");
-            const authors = $(el).find('a[href*="/autor/"]').map((i, a) => $(a).text().trim()).get();
+        $(".book-card").each((_, el) => {
+            const titleTag = $(el).find("a.book-card__title");
+            const title = titleTag.text().trim();
+            const url = titleTag.attr("href");
+            const idMatch = url && url.match(/\/ksiazka\/(\d+)/);
+            const bookId = idMatch ? idMatch[1] : undefined;
+            const authors = $(el).find('.book-card__author a').map((i, a) => $(a).text().trim()).get();
 
             if (title && url) {
                 matches.push({
-                    id: url.split("/").pop(),
-                             title: this.decodeUnicode(title),
+                    id: bookId,
+                    title: this.decodeUnicode(title),
                              authors: authors.map(a => this.decodeUnicode(a)),
-                             url: `${this.baseUrl}${url}`,
+                             url: url.startsWith('http') ? url : `${this.baseUrl}${url}`,
                              type
                 });
             }
