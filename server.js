@@ -1,4 +1,4 @@
-//  v11 fix: update LubimyCzytac parser selectors for new HTML structure
+//  v12 Fix: fetch correct book description
 const express = require("express");
 const axios = require("axios");
 const cheerio = require("cheerio");
@@ -142,9 +142,9 @@ class LubimyCzytacProvider {
                 const res = await axios.get(url, {
                     responseType: "arraybuffer",
                     timeout: Math.min(5500, timeLeft()),
-                    maxContentLength: 1500000,
-                    maxBodyLength: 1500000,
-                    signal
+                                            maxContentLength: 1500000,
+                                            maxBodyLength: 1500000,
+                                            signal
                 });
 
                 const finalUrl = res.request?.res?.responseUrl || url;
@@ -394,11 +394,14 @@ class LubimyCzytacProvider {
             throw new Error("Bot protection page detected");
         }
         const $ = cheerio.load(decodedData);
-
         const cover = $(".book-cover a").attr("data-cover") || $(".book-cover source").attr("srcset") || $(".book-cover img").attr("src") || $('meta[property="og:image"]').attr("content") || "";
 
         let description = "";
-        const htmlDesc = $(".collapse-content").html();
+
+        const htmlDesc =
+        $("#book-description").html() ||
+        $(".book__description").html() ||
+        $(".collapse-content").first().html();
 
         if (htmlDesc) {
             description = htmlDesc
